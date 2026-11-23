@@ -1,16 +1,12 @@
 import { useMemo, useState } from 'react';
 import { GoogleGenAI, Type } from '@google/genai';
-import { AlertCircle, Printer, RotateCcw } from 'lucide-react';
+import { AlertCircle, ClipboardCheck, Printer, RotateCcw } from 'lucide-react';
 import { BriefForm } from './components/BriefForm';
 import { ChecklistView } from './components/ChecklistView';
 import { MessagesView } from './components/MessagesView';
 import { PlanView } from './components/PlanView';
 import { PrintPackage } from './components/PrintPackage';
-import {
-  PRESET_BRIEFS,
-  createDefaultAnnaPackage,
-  createInitialBrief,
-} from './data/presets';
+import { PRESET_BRIEFS, createInitialBrief } from './data/presets';
 import { calculateOnboardingTimeline } from './lib/dates';
 import type { OnboardingBrief, OnboardingPackage } from './types/onboarding';
 
@@ -169,18 +165,31 @@ export default function App() {
       gdprAccess: false,
     },
   }));
-  const [pkg, setPkg] = useState<OnboardingPackage>(() =>
-    createDefaultAnnaPackage(createInitialBrief().startDate),
-  );
+  const [pkg, setPkg] = useState<OnboardingPackage | null>(null);
   const [completedIds, setCompletedIds] = useState<Record<string, boolean>>({});
   const [activeTab, setActiveTab] = useState<ActiveTab>('hr');
   const [isGenerating, setIsGenerating] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const activePresetId = useMemo(() => findMatchingPresetId(brief), [brief]);
-  const isDirty = useMemo(() => !areBriefsEqual(brief, pkg.brief), [brief, pkg.brief]);
+  const isDirty = useMemo(
+    () => (pkg ? !areBriefsEqual(brief, pkg.brief) : false),
+    [brief, pkg],
+  );
 
   const progress = useMemo(() => {
+    if (!pkg) {
+      return {
+        hrDone: 0,
+        hrTotal: 0,
+        itDone: 0,
+        itTotal: 0,
+        totalDone: 0,
+        total: 0,
+        percent: 0,
+      };
+    }
+
     const hrTasks = pkg.hrStages.flatMap((s) => s.tasks);
     const itTasks = pkg.itStages.flatMap((s) => s.tasks);
     const allTasks = [...hrTasks, ...itTasks];
@@ -203,17 +212,18 @@ export default function App() {
   }, [pkg, completedIds]);
 
   const activeTimeline = useMemo(
-    () => calculateOnboardingTimeline(pkg.brief.startDate),
-    [pkg.brief.startDate],
+    () => calculateOnboardingTimeline(pkg ? pkg.brief.startDate : brief.startDate),
+    [pkg, brief.startDate],
   );
 
   const activeConditionsList = useMemo(() => {
+    if (!pkg) return [];
     const list: string[] = [];
     if (pkg.brief.conditions.monitorOver4h) list.push('Monitor >4h');
     if (pkg.brief.conditions.companyCar) list.push('Samochód służbowy');
     if (pkg.brief.conditions.gdprAccess) list.push('Dostęp RODO');
     return list;
-  }, [pkg.brief.conditions]);
+  }, [pkg]);
 
   const handleSelectPreset = (presetId: string) => {
     const preset = PRESET_BRIEFS.find((p) => p.id === presetId);
@@ -256,8 +266,12 @@ export default function App() {
 
       const conditionsText = [
         brief.conditions.monitorOver4h ? 'Praca przy monitorze ekranowym >4h dziennie' : null,
-        brief.conditions.companyCar ? 'Samochód służbowy (wymagane badania psychotechniczne i umowa powierzenia mienia)' : null,
-        brief.conditions.gdprAccess ? 'Dostęp do danych osobowych (wymagane upoważnienie RODO i oświadczenie o poufności)' : null,
+        brief.conditions.companyCar
+          ? 'Samochód służbowy (wymagane badania psychotechniczne i umowa powierzenia mienia)'
+          : null,
+        brief.conditions.gdprAccess
+          ? 'Dostęp do danych osobowych (wymagane upoważnienie RODO i oświadczenie o poufności)'
+          : null,
       ]
         .filter(Boolean)
         .join(', ') || 'Brak dodatkowych warunków szczególnych';
@@ -302,17 +316,31 @@ WYMAGANIA MERYTORYCZNE I PRAWNE:
 
 Pisz naturalną, poprawną polszczyzną bez korporacyjnej nowomowy.`;
 
-      const result = await ai.models.generateContent({
-        model: 'gemini-3.5-flash-lite',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: onboardingResponseSchema,
-          temperature: 0.3,
-        },
-      });
+      let result;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          result = await ai.models.generateContent({
+            model: 'gemini-3.5-flash-lite',
+            contents: prompt,
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: onboardingResponseSchema,
+              temperature: 0.3,
+            },
+          });
+          break;
+        } catch (apiErr) {
+          const msg = apiErr instanceof Error ? apiErr.message : String(apiErr);
+          const isTransient = msg.includes('503') || msg.includes('UNAVAILABLE') || msg.includes('high demand');
+          if (isTransient && attempt < 3) {
+            await new Promise((resolve) => setTimeout(resolve, 2500 * attempt));
+            continue;
+          }
+          throw apiErr;
+        }
+      }
 
-      const rawText = result.text;
+      const rawText = result?.text;
       if (!rawText) {
         throw new Error('Model AI zwrócił pustą odpowiedź. Spróbuj ponownie.');
       }
@@ -337,7 +365,11 @@ Pisz naturalną, poprawną polszczyzną bez korporacyjnej nowomowy.`;
       console.error('Błąd generowania pakietu onboardingowego:', err);
       const rawMsg = err instanceof Error ? err.message : String(err);
 
-      if (rawMsg.includes('429') || rawMsg.includes('RESOURCE_EXHAUSTED')) {
+      if (rawMsg.includes('503') || rawMsg.includes('UNAVAILABLE') || rawMsg.includes('high demand')) {
+        setErrorMessage(
+          'Serwery Google AI są w tej chwili chwilowo przeciążone (błąd 503). Odczekaj 10–15 sekund i kliknij „Spróbuj ponownie”.',
+        );
+      } else if (rawMsg.includes('429') || rawMsg.includes('RESOURCE_EXHAUSTED')) {
         setErrorMessage(
           'Przekroczono chwilowy limit zapytań darmowego klucza API Google. Odczekaj ok. 30 sekund i kliknij „Spróbuj ponownie”.',
         );
@@ -377,16 +409,18 @@ Pisz naturalną, poprawną polszczyzną bez korporacyjnej nowomowy.`;
             Asystent Onboardingu HR
           </span>
 
-          <div className="flex items-center gap-3 shrink-0">
-            <button
-              type="button"
-              onClick={handlePrint}
-              className="min-h-[38px] px-3.5 py-2 rounded-lg bg-white border border-[#D4DAE3] text-xs font-medium text-[#111318] hover:bg-[#F6F7F9] transition-colors duration-150 inline-flex items-center gap-2 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1E3A8A]"
-            >
-              <Printer className="w-3.5 h-3.5 text-[#525B6B] shrink-0" aria-hidden="true" />
-              <span>Drukuj / Zapisz jako PDF</span>
-            </button>
-          </div>
+          {pkg && (
+            <div className="flex items-center gap-3 shrink-0">
+              <button
+                type="button"
+                onClick={handlePrint}
+                className="min-h-[38px] px-3.5 py-2 rounded-lg bg-white border border-[#D4DAE3] text-xs font-medium text-[#111318] hover:bg-[#F6F7F9] transition-colors duration-150 inline-flex items-center gap-2 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1E3A8A]"
+              >
+                <Printer className="w-3.5 h-3.5 text-[#525B6B] shrink-0" aria-hidden="true" />
+                <span>Drukuj / Zapisz jako PDF</span>
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -406,7 +440,7 @@ Pisz naturalną, poprawną polszczyzną bez korporacyjnej nowomowy.`;
             />
           </div>
 
-          {/* Right Column — Package & Interactive Checklist */}
+          {/* Right Column — Empty State OR Generated Package */}
           <section className="lg:col-span-8 bg-white border border-[#E2E6EC] rounded-xl overflow-hidden">
             {/* Error Banner */}
             {errorMessage && (
@@ -428,146 +462,177 @@ Pisz naturalną, poprawną polszczyzną bez korporacyjnej nowomowy.`;
               </div>
             )}
 
-            {/* Package Header & Progress */}
-            <div className="px-6 pt-6 pb-5 border-b border-[#E2E6EC]">
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-[#111318]">
-                  {pkg.brief.firstName} — {pkg.brief.role}
-                </h1>
-                <span className="text-xs text-[#647082] whitespace-nowrap">
-                  {pkg.source === 'example' ? 'Przykład startowy' : 'Pakiet wygenerowany'}
-                </span>
-              </div>
-
-              {/* Clean unboxed metadata row */}
-              <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[#525B6B]">
-                <span>Dział: {pkg.brief.department}</span>
-                <span aria-hidden="true">·</span>
-                <span>Przełożony: {pkg.brief.managerName}</span>
-                <span aria-hidden="true">·</span>
-                <span>{pkg.brief.contractType}</span>
-                <span aria-hidden="true">·</span>
-                <span>{pkg.brief.workMode}</span>
-                <span aria-hidden="true">·</span>
-                <span className="font-mono tabular-nums text-[#111318]">
-                  Start: {activeTimeline.startDateFormatted}
-                </span>
-              </div>
-
-              {activeConditionsList.length > 0 && (
-                <div className="mt-1 text-xs text-[#647082]">
-                  Warunki: {activeConditionsList.join(' · ')}
+            {isGenerating ? (
+              <div className="p-6 space-y-6 animate-pulse" aria-busy="true" aria-label="Generowanie pakietu">
+                <div className="space-y-2 pb-5 border-b border-[#E2E6EC]">
+                  <div className="h-6 w-1/2 bg-[#E2E6EC] rounded" />
+                  <div className="h-3.5 w-2/3 bg-[#ECEFF4] rounded" />
+                  <div className="h-4 w-full bg-[#F3F5F8] rounded mt-3" />
                 </div>
-              )}
-
-              <p className="mt-3 text-sm text-[#3C4453] leading-relaxed max-w-3xl">
-                {pkg.summary}
-              </p>
-
-              {/* Live Progress Bar */}
-              <div className="mt-5 pt-4 border-t border-[#ECEFF4]">
-                <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
-                  <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
-                    <span className="text-xs font-semibold text-[#111318] font-mono tabular-nums">
-                      Ukończono {progress.totalDone} z {progress.total} zadań · {progress.percent}%
+                {[1, 2, 3].map((group) => (
+                  <div key={group} className="space-y-3 pt-2">
+                    <div className="flex justify-between pb-2 border-b border-[#ECEFF4]">
+                      <div className="h-4 w-36 bg-[#E2E6EC] rounded" />
+                      <div className="h-3.5 w-24 bg-[#ECEFF4] rounded" />
+                    </div>
+                    {[1, 2, 3].map((row) => (
+                      <div key={row} className="flex items-start gap-3.5 py-2">
+                        <div className="w-5 h-5 rounded-md bg-[#ECEFF4] shrink-0" />
+                        <div className="flex-1 space-y-2">
+                          <div className="h-4 w-3/4 bg-[#ECEFF4] rounded" />
+                          <div className="h-3 w-full bg-[#F3F5F8] rounded" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ) : !pkg ? (
+              <div className="px-6 py-16 sm:py-24 text-center max-w-lg mx-auto">
+                <div className="w-11 h-11 rounded-xl bg-[#EEF2FF] text-[#1E3A8A] flex items-center justify-center mx-auto mb-4">
+                  <ClipboardCheck className="w-5 h-5" aria-hidden="true" />
+                </div>
+                <h1 className="text-lg font-semibold text-[#111318]">
+                  Gotowy na wygenerowanie planu wdrożenia
+                </h1>
+                <p className="mt-2 text-sm text-[#525B6B] leading-relaxed">
+                  Uzupełnij dane nowej osoby w formularzu po lewej stronie i kliknij{' '}
+                  <span className="font-medium text-[#111318]">„Generuj pakiet onboardingowy”</span>.
+                </p>
+                <div className="mt-6 pt-6 border-t border-[#ECEFF4] grid grid-cols-1 sm:grid-cols-2 gap-3 text-left text-xs text-[#525B6B]">
+                  <div className="p-3 rounded-lg bg-[#F6F7F9]">
+                    <span className="block font-semibold text-[#111318] mb-0.5">
+                      Twardy HR i Kadry
                     </span>
-                    <span className="text-xs text-[#647082] font-mono tabular-nums">
-                      HR: {progress.hrDone}/{progress.hrTotal} · IT: {progress.itDone}/{progress.itTotal}
+                    Daty graniczne wyliczone wstecz i w przód od dnia startu (KP, ZUS, RODO).
+                  </div>
+                  <div className="p-3 rounded-lg bg-[#F6F7F9]">
+                    <span className="block font-semibold text-[#111318] mb-0.5">
+                      IT, Plan 30-60-90 i Szablony
+                    </span>
+                    Logistyka sprzętu, harmonogram 1. tygodnia oraz gotowe maile powitalne.
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
+                {/* Package Header & Progress */}
+                <div className="px-6 pt-6 pb-5 border-b border-[#E2E6EC]">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-[#111318]">
+                      {pkg.brief.firstName} — {pkg.brief.role}
+                    </h1>
+                    <span className="text-xs text-[#647082] whitespace-nowrap">
+                      Pakiet wygenerowany
                     </span>
                   </div>
 
-                  {progress.totalDone > 0 && (
-                    <button
-                      type="button"
-                      onClick={handleResetProgress}
-                      className="text-xs text-[#525B6B] hover:text-[#111318] inline-flex items-center gap-1 transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A] rounded"
-                    >
-                      <RotateCcw className="w-3 h-3" aria-hidden="true" />
-                      <span>Resetuj postęp</span>
-                    </button>
+                  {/* Clean unboxed metadata row */}
+                  <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[#525B6B]">
+                    <span>Dział: {pkg.brief.department}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>Przełożony: {pkg.brief.managerName}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{pkg.brief.contractType}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{pkg.brief.workMode}</span>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono tabular-nums text-[#111318]">
+                      Start: {activeTimeline.startDateFormatted}
+                    </span>
+                  </div>
+
+                  {activeConditionsList.length > 0 && (
+                    <div className="mt-1 text-xs text-[#647082]">
+                      Warunki: {activeConditionsList.join(' · ')}
+                    </div>
                   )}
-                </div>
 
-                <div
-                  role="progressbar"
-                  aria-valuenow={progress.percent}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-label="Postęp ukończenia checklisty onboardingowej"
-                  className="h-2 w-full bg-[#ECEFF4] rounded-full overflow-hidden"
-                >
-                  <div
-                    className={`h-full rounded-full transition-all duration-200 ${
-                      progress.percent === 100 ? 'bg-[#0F6B54]' : 'bg-[#1E3A8A]'
-                    }`}
-                    style={{ width: `${progress.percent}%` }}
-                  />
-                </div>
-              </div>
-            </div>
+                  <p className="mt-3 text-sm text-[#3C4453] leading-relaxed max-w-3xl">
+                    {pkg.summary}
+                  </p>
 
-            {/* 4 Switchable Tabs */}
-            <nav
-              aria-label="Sekcje pakietu onboardingowego"
-              className="border-b border-[#E2E6EC] px-6 overflow-x-auto"
-            >
-              <div className="flex items-center gap-6 -mb-px" role="tablist">
-                {tabs.map((tab) => {
-                  const isActive = activeTab === tab.id;
-                  return (
-                    <button
-                      key={tab.id}
-                      role="tab"
-                      type="button"
-                      aria-selected={isActive}
-                      onClick={() => setActiveTab(tab.id)}
-                      className={`py-3.5 text-xs sm:text-sm font-medium border-b-2 transition-colors duration-150 whitespace-nowrap shrink-0 flex items-center gap-2 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[#1E3A8A] ${
-                        isActive
-                          ? 'border-[#1E3A8A] text-[#1E3A8A]'
-                          : 'border-transparent text-[#525B6B] hover:text-[#111318] hover:border-[#CBD3DF]'
-                      }`}
+                  {/* Live Progress Bar */}
+                  <div className="mt-5 pt-4 border-t border-[#ECEFF4]">
+                    <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+                      <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
+                        <span className="text-xs font-semibold text-[#111318] font-mono tabular-nums">
+                          Ukończono {progress.totalDone} z {progress.total} zadań · {progress.percent}%
+                        </span>
+                        <span className="text-xs text-[#647082] font-mono tabular-nums">
+                          HR: {progress.hrDone}/{progress.hrTotal} · IT: {progress.itDone}/{progress.itTotal}
+                        </span>
+                      </div>
+
+                      {progress.totalDone > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleResetProgress}
+                          className="text-xs text-[#525B6B] hover:text-[#111318] inline-flex items-center gap-1 transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A] rounded"
+                        >
+                          <RotateCcw className="w-3 h-3" aria-hidden="true" />
+                          <span>Resetuj postęp</span>
+                        </button>
+                      )}
+                    </div>
+
+                    <div
+                      role="progressbar"
+                      aria-valuenow={progress.percent}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-label="Postęp ukończenia checklisty onboardingowej"
+                      className="h-2 w-full bg-[#ECEFF4] rounded-full overflow-hidden"
                     >
-                      <span>{tab.label}</span>
-                      {tab.count && (
-                        <span
-                          className={`text-[11px] font-mono tabular-nums ${
-                            isActive ? 'text-[#1E3A8A]' : 'text-[#8C95A6]'
+                      <div
+                        className={`h-full rounded-full transition-all duration-200 ${
+                          progress.percent === 100 ? 'bg-[#0F6B54]' : 'bg-[#1E3A8A]'
+                        }`}
+                        style={{ width: `${progress.percent}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* 4 Switchable Tabs */}
+                <nav
+                  aria-label="Sekcje pakietu onboardingowego"
+                  className="border-b border-[#E2E6EC] px-6 overflow-x-auto"
+                >
+                  <div className="flex items-center gap-6 -mb-px" role="tablist">
+                    {tabs.map((tab) => {
+                      const isActive = activeTab === tab.id;
+                      return (
+                        <button
+                          key={tab.id}
+                          role="tab"
+                          type="button"
+                          aria-selected={isActive}
+                          onClick={() => setActiveTab(tab.id)}
+                          className={`py-3.5 text-xs sm:text-sm font-medium border-b-2 transition-colors duration-150 whitespace-nowrap shrink-0 flex items-center gap-2 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[#1E3A8A] ${
+                            isActive
+                              ? 'border-[#1E3A8A] text-[#1E3A8A]'
+                              : 'border-transparent text-[#525B6B] hover:text-[#111318] hover:border-[#CBD3DF]'
                           }`}
                         >
-                          {tab.count}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </nav>
+                          <span>{tab.label}</span>
+                          {tab.count && (
+                            <span
+                              className={`text-[11px] font-mono tabular-nums ${
+                                isActive ? 'text-[#1E3A8A]' : 'text-[#8C95A6]'
+                              }`}
+                            >
+                              {tab.count}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </nav>
 
-            {/* Tab Panel Content */}
-            <div className="p-6" role="tabpanel">
-              {isGenerating ? (
-                <div className="space-y-6 animate-pulse" aria-busy="true" aria-label="Generowanie pakietu">
-                  <div className="h-4 w-2/3 bg-[#ECEFF4] rounded" />
-                  {[1, 2, 3].map((group) => (
-                    <div key={group} className="space-y-3 pt-2">
-                      <div className="flex justify-between pb-2 border-b border-[#ECEFF4]">
-                        <div className="h-4 w-36 bg-[#E2E6EC] rounded" />
-                        <div className="h-3.5 w-24 bg-[#ECEFF4] rounded" />
-                      </div>
-                      {[1, 2, 3].map((row) => (
-                        <div key={row} className="flex items-start gap-3.5 py-2">
-                          <div className="w-5 h-5 rounded-md bg-[#ECEFF4] shrink-0" />
-                          <div className="flex-1 space-y-2">
-                            <div className="h-4 w-3/4 bg-[#ECEFF4] rounded" />
-                            <div className="h-3 w-full bg-[#F3F5F8] rounded" />
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <>
+                {/* Tab Panel Content */}
+                <div className="p-6" role="tabpanel">
                   {activeTab === 'hr' && (
                     <ChecklistView
                       stages={pkg.hrStages}
@@ -600,15 +665,15 @@ Pisz naturalną, poprawną polszczyzną bez korporacyjnej nowomowy.`;
                       managerBrief={pkg.messages.managerBrief}
                     />
                   )}
-                </>
-              )}
-            </div>
+                </div>
+              </>
+            )}
           </section>
         </div>
       </main>
 
       {/* Dedicated A4 Print View */}
-      <PrintPackage pkg={pkg} completedIds={completedIds} />
+      {pkg && <PrintPackage pkg={pkg} completedIds={completedIds} />}
     </div>
   );
 }
