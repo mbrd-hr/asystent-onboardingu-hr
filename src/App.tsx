@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { GoogleGenAI, Type } from '@google/genai';
 import { AlertCircle, Printer, RotateCcw } from 'lucide-react';
 import { BriefForm } from './components/BriefForm';
 import { ChecklistView } from './components/ChecklistView';
@@ -45,6 +46,113 @@ function findMatchingPresetId(brief: OnboardingBrief): string | null {
   );
   return match ? match.id : null;
 }
+
+const checklistStageSchema = {
+  type: Type.ARRAY,
+  items: {
+    type: Type.OBJECT,
+    properties: {
+      id: { type: Type.STRING },
+      title: { type: Type.STRING },
+      deadlineLabel: { type: Type.STRING },
+      tasks: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            id: { type: Type.STRING },
+            title: { type: Type.STRING },
+            description: { type: Type.STRING },
+            owner: { type: Type.STRING },
+            dueDate: { type: Type.STRING },
+            legalRef: { type: Type.STRING },
+          },
+          required: ['id', 'title', 'description', 'owner', 'dueDate'],
+        },
+      },
+    },
+    required: ['id', 'title', 'deadlineLabel', 'tasks'],
+  },
+};
+
+const onboardingResponseSchema = {
+  type: Type.OBJECT,
+  properties: {
+    summary: { type: Type.STRING },
+    hrStages: checklistStageSchema,
+    itStages: checklistStageSchema,
+    weekOnePlan: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          dayNumber: { type: Type.INTEGER },
+          dateLabel: { type: Type.STRING },
+          focus: { type: Type.STRING },
+          activities: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                timeSlot: { type: Type.STRING },
+                title: { type: Type.STRING },
+                lead: { type: Type.STRING },
+              },
+              required: ['timeSlot', 'title', 'lead'],
+            },
+          },
+        },
+        required: ['dayNumber', 'dateLabel', 'focus', 'activities'],
+      },
+    },
+    goals306090: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          period: { type: Type.STRING },
+          targetDate: { type: Type.STRING },
+          headline: { type: Type.STRING },
+          milestones: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+          },
+          successMetric: { type: Type.STRING },
+        },
+        required: ['period', 'targetDate', 'headline', 'milestones', 'successMetric'],
+      },
+    },
+    messages: {
+      type: Type.OBJECT,
+      properties: {
+        welcomeEmail: {
+          type: Type.OBJECT,
+          properties: {
+            title: { type: Type.STRING },
+            sendDateLabel: { type: Type.STRING },
+            recipientLabel: { type: Type.STRING },
+            subject: { type: Type.STRING },
+            body: { type: Type.STRING },
+          },
+          required: ['title', 'sendDateLabel', 'recipientLabel', 'subject', 'body'],
+        },
+        managerBrief: {
+          type: Type.OBJECT,
+          properties: {
+            title: { type: Type.STRING },
+            sendDateLabel: { type: Type.STRING },
+            recipientLabel: { type: Type.STRING },
+            subject: { type: Type.STRING },
+            body: { type: Type.STRING },
+          },
+          required: ['title', 'sendDateLabel', 'recipientLabel', 'subject', 'body'],
+        },
+      },
+      required: ['welcomeEmail', 'managerBrief'],
+    },
+  },
+  required: ['summary', 'hrStages', 'itStages', 'weekOnePlan', 'goals306090', 'messages'],
+};
 
 export default function App() {
   const [brief, setBrief] = useState<OnboardingBrief>(() => createInitialBrief());
@@ -120,29 +228,113 @@ export default function App() {
     setErrorMessage(null);
 
     try {
-      const response = await fetch('/api/onboarding/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(brief),
-      });
+      const apiKey =
+        import.meta.env.VITE_GEMINI_API_KEY ||
+        (typeof process !== 'undefined' ? process.env?.GEMINI_API_KEY : undefined);
 
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
+      if (!apiKey) {
         throw new Error(
-          typeof data.error === 'string'
-            ? data.error
-            : 'Nie udało się wygenerować pakietu onboardingowego.',
+          'Brak klucza API Google Gemini. Dodaj zmienną VITE_GEMINI_API_KEY w ustawieniach Vercel (Environment Variables) i wykonaj Redeploy.',
         );
       }
 
-      setPkg(data as OnboardingPackage);
+      const ai = new GoogleGenAI({ apiKey });
+      const timeline = calculateOnboardingTimeline(brief.startDate);
+
+      const conditionsText = [
+        brief.conditions.monitorOver4h ? 'Praca przy monitorze ekranowym >4h dziennie' : null,
+        brief.conditions.companyCar ? 'Samochód służbowy (wymagane badania psychotechniczne i umowa powierzenia mienia)' : null,
+        brief.conditions.gdprAccess ? 'Dostęp do danych osobowych (wymagane upoważnienie RODO i oświadczenie o poufności)' : null,
+      ]
+        .filter(Boolean)
+        .join(', ') || 'Brak dodatkowych warunków szczególnych';
+
+      const prompt = `Jesteś doświadczonym polskim Ekspertem HR Operations, Kadr i Płac oraz Onboardingu (13+ lat praktyki w polskim prawie pracy).
+Wygeneruj kompletny, praktyczny i zgodny z polskimi przepisami pakiet onboardingowy w języku polskim dla poniższego pracownika/współpracownika:
+
+DANE WEJŚCIOWE:
+- Imię: ${brief.firstName}
+- Stanowisko: ${brief.role}
+- Dział: ${brief.department}
+- Przełożony (Hiring Manager): ${brief.managerName}
+- Forma zatrudnienia: ${brief.contractType}
+- Tryb pracy: ${brief.workMode}
+- Data rozpoczęcia pracy: ${timeline.startDateFormatted} (${timeline.startDateFull})
+- Warunki dodatkowe: ${conditionsText}
+
+WYLICZONE DATY GRANICZNE (UŻYJ DOKŁADNIE TYCH DAT W POLACH dueDate, dateLabel, targetDate):
+- 10 dni roboczych przed startem: ${timeline.preboarding10WorkDaysBefore}
+- 5 dni roboczych przed startem: ${timeline.preboarding5WorkDaysBefore}
+- 3 dni robocze przed startem: ${timeline.preboarding3WorkDaysBefore}
+- 1 dzień roboczy przed startem: ${timeline.preboarding1WorkDayBefore}
+- Dzień startu (1. dzień): ${timeline.startDateFormatted}
+- 7 dni kalendarzowych po starcie (termin ZUS): ${timeline.plus7CalendarDays}
+- 30 dni po starcie: ${timeline.plus30CalendarDays}
+- 60 dni po starcie: ${timeline.plus60CalendarDays}
+- 90 dni po starcie: ${timeline.plus90CalendarDays}
+- Daty kolejnych 5 dni roboczych 1. tygodnia: ${timeline.weekOneDates.join(' | ')}
+
+WYMAGANIA MERYTORYCZNE I PRAWNE:
+1. "summary": Zwięzłe (2-3 zdania) podsumowanie kluczowych wymogów formalnych i organizacyjnych dla tej konkretnej konfiguracji (${brief.contractType}, ${brief.workMode}).
+2. "hrStages": Podziel checklistę Twardego HR i Kadr na logiczne etapy (np. "Przed 1. dniem", "1. dzień pracy", "Do 7 dni od startu", "Do 30 / 90 dni") z unikalnymi ID zadań ("hr-1", "hr-2" itd.).
+   - Dla "Umowa o pracę": uwzględnij skierowanie na wstępne badania medycyny pracy przed dopuszczeniem do pracy (art. 229 § 1 i 4 KP — z uwzględnieniem monitora >4h i auta służbowego, jeśli zaznaczono), kwestionariusz osobowy (art. 22¹ KP), umowę o pracę (art. 29 § 1-2 KP), szkolenie wstępne BHP (art. 237³ KP), informację o warunkach zatrudnienia w ciągu 7 dni (art. 29 § 3 KP), zgłoszenie do ZUS ZUA/ZZA w terminie 7 dni (art. 36 ust. 4 ustawy o sus), PIT-2, klauzulę informacyjną RODO / upoważnienie do przetwarzania danych (jeśli zaznaczono), ocenę ryzyka zawodowego i zasady pracy zdalnej/hybrydowej (art. 67¹⁸ KP).
+   - Dla "Kontrakt B2B": NIE wpisuj badań medycyny pracy z KP, PIT-2 ani ZUS ZUA pracowniczego — zamiast tego weryfikację wpisu w CEIDG / białej listy VAT, podpisanie umowy B2B, NDA (umowy o poufności), upoważnienie RODO (jeśli zaznaczono), powierzenie sprzętu / auta służbowego (jeśli zaznaczono) oraz instrukcję obiegu faktur.
+   - Dla "Umowa zlecenie": umowa zlecenie, oświadczenie do celów ZUS/podatkowych (status studenta/inny tytuł do ubezpieczeń), zgłoszenie ZUS ZUA/ZZA w ciągu 7 dni, BHP i badania (jeśli wymaga charakter pracy), RODO/NDA.
+3. "itStages": Podziel checklistę IT, Sprzętu i Administracji na etapy ("Przed 1. dniem", "1. dzień pracy") z unikalnymi ID ("it-1", "it-2" itd.). Dla trybu "100% Zdalny" uwzględnij wysyłkę sprzętu kurierem do ${timeline.preboarding3WorkDaysBefore} i zdalne aktywowanie kont/MFA.
+4. "weekOnePlan": Dokładnie 5 dni (dayNumber: 1..5), używając w "dateLabel" dokładnych etykiet z listy: ${timeline.weekOneDates.join(', ')}. Każdy dzień powinien mieć 3-4 konkretne bloki czasowe ("timeSlot", np. "09:00 – 10:30") dopasowane do roli "${brief.role}".
+5. "goals306090": Dokładnie 3 fazy ("Pierwsze 30 dni" do ${timeline.plus30CalendarDays}, "Dni 31–60" do ${timeline.plus60CalendarDays}, "Dni 61–90" do ${timeline.plus90CalendarDays}) z konkretnymi kamieniami milowymi i mierzalnym wskaźnikiem sukcesu dla stanowiska "${brief.role}".
+6. "messages":
+   - "welcomeEmail": Naturalny, ciepły, konkretny mail powitalny do ${brief.firstName} wysyłany na 3 dni przed startem (${timeline.preboarding3WorkDaysBefore}), uwzględniający tryb pracy (${brief.workMode}) i plan 1. dnia.
+   - "managerBrief": Konkretny brief organizacyjny dla menedżera (${brief.managerName}) przypominający o przygotowaniu zespołu, Buddy'ego i planu na 1. dzień (${timeline.startDateFormatted}).
+
+Pisz naturalną, poprawną polszczyzną bez korporacyjnej nowomowy.`;
+
+      const result = await ai.models.generateContent({
+        model: 'gemini-3.5-flash-lite',
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: onboardingResponseSchema,
+          temperature: 0.3,
+        },
+      });
+
+      const rawText = result.text;
+      if (!rawText) {
+        throw new Error('Model AI zwrócił pustą odpowiedź. Spróbuj ponownie.');
+      }
+
+      const parsed = JSON.parse(rawText);
+
+      const generatedPackage: OnboardingPackage = {
+        brief: { ...brief },
+        summary: parsed.summary,
+        hrStages: parsed.hrStages,
+        itStages: parsed.itStages,
+        weekOnePlan: parsed.weekOnePlan,
+        goals306090: parsed.goals306090,
+        messages: parsed.messages,
+        generatedAt: new Date().toISOString(),
+        source: 'ai',
+      };
+
+      setPkg(generatedPackage);
       setCompletedIds({});
     } catch (err) {
-      setErrorMessage(
-        err instanceof Error
-          ? err.message
-          : 'Wystąpił błąd połączenia z serwerem. Spróbuj ponownie.',
-      );
+      console.error('Błąd generowania pakietu onboardingowego:', err);
+      const rawMsg = err instanceof Error ? err.message : String(err);
+
+      if (rawMsg.includes('429') || rawMsg.includes('RESOURCE_EXHAUSTED')) {
+        setErrorMessage(
+          'Przekroczono chwilowy limit zapytań darmowego klucza API Google. Odczekaj ok. 30 sekund i kliknij „Spróbuj ponownie”.',
+        );
+      } else if (rawMsg.includes('API_KEY_INVALID') || rawMsg.includes('401') || rawMsg.includes('403')) {
+        setErrorMessage(
+          'Nieprawidłowy klucz API Google Gemini. Sprawdź zmienną VITE_GEMINI_API_KEY na Vercelu.',
+        );
+      } else {
+        setErrorMessage(`Nie udało się wygenerować pakietu: ${rawMsg}`);
+      }
     } finally {
       setIsGenerating(false);
     }
