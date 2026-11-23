@@ -155,7 +155,20 @@ const onboardingResponseSchema = {
 };
 
 export default function App() {
-  const [brief, setBrief] = useState<OnboardingBrief>(() => createInitialBrief());
+  const [brief, setBrief] = useState<OnboardingBrief>(() => ({
+    firstName: '',
+    role: '',
+    department: '',
+    managerName: '',
+    contractType: 'Umowa o pracę',
+    workMode: 'Hybrydowy',
+    startDate: createInitialBrief().startDate,
+    conditions: {
+      monitorOver4h: false,
+      companyCar: false,
+      gdprAccess: false,
+    },
+  }));
   const [pkg, setPkg] = useState<OnboardingPackage>(() =>
     createDefaultAnnaPackage(createInitialBrief().startDate),
   );
