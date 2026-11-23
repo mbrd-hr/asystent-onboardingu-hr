@@ -1,0 +1,6 @@
+{
+  "name": "Asystent Onboardingu HR — Generator Checklist i Planów Wdrożenia",
+  "description": "Generator checklist kadrowych, zadań IT, planów 30-60-90 dni i wiadomości powitalnych dla specjalistów HR i kadr zgodnie z polskim prawem pracy i RODO.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
