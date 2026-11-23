@@ -1,5 +1,4 @@
-import { AlertTriangle, Check, Loader2, ShieldCheck } from 'lucide-react';
-import { PRESET_BRIEFS } from '../data/presets';
+import { AlertTriangle, Loader2, ShieldCheck } from 'lucide-react';
 import { calculateOnboardingTimeline, getDefaultStartDateIso } from '../lib/dates';
 import type { ContractType, OnboardingBrief, WorkMode } from '../types/onboarding';
 
@@ -9,8 +8,8 @@ interface BriefFormProps {
   onSubmit: () => void;
   isGenerating: boolean;
   isDirty: boolean;
-  activePresetId: string | null;
-  onSelectPreset: (presetId: string) => void;
+  activePresetId?: string | null;
+  onSelectPreset?: (presetId: string) => void;
 }
 
 const CONTRACT_OPTIONS: ContractType[] = ['Umowa o pracę', 'Umowa zlecenie', 'Kontrakt B2B'];
@@ -22,8 +21,6 @@ export function BriefForm({
   onSubmit,
   isGenerating,
   isDirty,
-  activePresetId,
-  onSelectPreset,
 }: BriefFormProps) {
   const timeline = calculateOnboardingTimeline(brief.startDate);
 
@@ -56,34 +53,6 @@ export function BriefForm({
 
   return (
     <aside className="bg-white border border-[#E2E6EC] rounded-xl overflow-hidden">
-      {/* Presets section */}
-      <div className="px-5 pt-5 pb-4 border-b border-[#E2E6EC]">
-        <div className="flex items-center justify-between gap-2 mb-3">
-          <h2 className="text-sm font-semibold text-[#111318]">Szybkie szablony briefu</h2>
-          <span className="text-xs text-[#647082]">1 kliknięcie</span>
-        </div>
-        <div className="flex flex-col gap-1.5">
-          {PRESET_BRIEFS.map((preset) => {
-            const isSelected = activePresetId === preset.id;
-            return (
-              <button
-                key={preset.id}
-                type="button"
-                onClick={() => onSelectPreset(preset.id)}
-                className={`w-full text-left px-3 py-2.5 rounded-lg text-xs font-medium transition-colors duration-150 flex items-center justify-between gap-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1E3A8A] ${
-                  isSelected
-                    ? 'bg-[#EEF2FF] text-[#1E3A8A] border border-[#C7D4F5]'
-                    : 'bg-[#F6F7F9] text-[#2D3542] border border-transparent hover:bg-[#ECEFF4] hover:text-[#111318]'
-                }`}
-              >
-                <span className="truncate">{preset.label}</span>
-                {isSelected && <Check className="w-3.5 h-3.5 shrink-0 text-[#1E3A8A]" aria-hidden="true" />}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
       {/* Main Brief Form */}
       <form onSubmit={handleFormSubmit} className="p-5 space-y-5">
         <div>
